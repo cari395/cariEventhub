@@ -1,51 +1,66 @@
-# ==========================================================
-# Dockerfile para EventHub - Django/Python
-# ==========================================================
+name: Deploy continuo
 
-# ETAPA 1 - Builder
-FROM python:3.12-slim as builder
+on:
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Integracion continua"]
+    types:
+      - completed
 
-WORKDIR /app
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc python3-dev && \
-    rm -rf /var/lib/apt/lists/*
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
 
-COPY requirements.txt .
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install -r requirements.txt
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-# ETAPA 2 - Runtime
-FROM python:3.12-slim
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/eventhub
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
 
-WORKDIR /app
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            PYTHON_VERSION=3.12
+            DJANGO_SETTINGS_MODULE=eventhub.settings
+            DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
 
-RUN groupadd -r eventhub && useradd -r -g eventhub eventhub && \
-    chown eventhub:eventhub /app
+  deploy-render:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
 
-COPY --from=builder /opt/venv /opt/venv
-COPY --chown=eventhub:eventhub . .
-
-ARG DJANGO_SECRET_KEY
-ENV DJANGO_SECRET_KEY=$DJANGO_SECRET_KEY
-
-ENV VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:$PATH" \
-    DJANGO_SETTINGS_MODULE="eventhub.settings" \
-    SETTINGS_MODULE="eventhub.settings"
-
-RUN chmod -R a+xr /opt/venv
-
-EXPOSE 8000
-
-USER eventhub
-
-COPY --chown=eventhub:eventhub entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
-ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["/opt/venv/bin/gunicorn", "--bind", "0.0.0.0:8000", "eventhub.wsgi:application"]
+    steps:
+      - name: Deploy to Render
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          echo "Iniciando despliegue en Render..."
+          curl -X POST \
+            "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
+            -H "Authorization: Bearer $RENDER_API_KEY"
